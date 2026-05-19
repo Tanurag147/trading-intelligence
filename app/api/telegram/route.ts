@@ -37,7 +37,7 @@ export async function POST(req: Request) {
 
     const chatId = String(msg.chat.id)
     const raw = msg.text.trim()
-    const stripped = raw.startsWith('trading:') ? raw.slice('trading:'.length).trim() : raw
+    const stripped = raw.replace(/^trading:\s*/i, '')
     const [cmd, ...args] = stripped.split(/\s+/)
 
     switch (cmd.toLowerCase()) {
