@@ -126,9 +126,9 @@ export function calculateRegime(
   ohlcRaw: [number, number, number, number, number][]
 ): RegimeResult {
   const daily = aggregateToDaily(ohlcRaw)
-  if (daily.length < 35) {
+  if (daily.length < 28) {
     throw new Error(
-      `Not enough daily candles for ${asset}: got ${daily.length}, need ≥35`
+      `Not enough daily candles for ${asset}: got ${daily.length}, need ≥28`
     )
   }
 

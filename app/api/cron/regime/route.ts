@@ -26,7 +26,7 @@ type AssetResult = AssetResultOk | AssetResultErr
 async function fetchOhlc(
   coingeckoId: string
 ): Promise<[number, number, number, number, number][]> {
-  const url = `https://api.coingecko.com/api/v3/coins/${coingeckoId}/ohlc?vs_currency=usd&days=90`
+  const url = `https://api.coingecko.com/api/v3/coins/${coingeckoId}/ohlc?vs_currency=usd&days=30`
   const res = await fetch(url, { cache: 'no-store' })
   if (!res.ok) {
     throw new Error(`CoinGecko ${coingeckoId} failed: ${res.status}`)
