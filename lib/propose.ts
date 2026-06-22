@@ -37,14 +37,16 @@ import { validateProposalRisk } from './risk-gate';
 import { saveProposal } from './persist';
 import { mintNonce, verifyAndBurnNonce, type NonceCheck } from './nonce';
 import { sendMessage, sendProposalCard, type ProposalAction } from './telegram';
+import { FixtureFeed } from './feeds/fixture';
 import {
   DEFAULT_LIMITS,
   type ProposalCard,
   type RiskGateResult,
   type PortfolioContext,
   type RiskLimits,
+  type CostModel,
 } from './proposal';
-import type { MarketFeed } from './feed';
+import type { MarketFeed, Quote, Bar } from './feed';
 
 const NONCE_TABLE = 'trading_callback_nonces';
 
@@ -102,6 +104,110 @@ export async function runProposal(args: RunProposalArgs): Promise<RunProposalRes
 
   await sendProposalCard(args.chatId, card, { approve, skip, snooze });
   return { proposal_id: card.proposal_id, gate_passed: true, sent: true };
+}
+
+// ----------------------------------------------------------------------------
+// Fixture assembler — the paper-phase stand-in that turns a bare symbol into the
+// full RunProposalArgs runProposal needs. Until the live quality/regime/portfolio
+// reads are wired, `trading:propose SYMBOL` uses this to exercise the whole
+// build → gate → persist → card path deterministically. The values are chosen to
+// PASS the gate under DEFAULT_LIMITS (tier-4 trending_up, 2.5RR geometry,
+// quality 8, risk within every cap), so a propose always demonstrates the happy
+// path with live approve/skip/snooze buttons.
+// ----------------------------------------------------------------------------
+
+const FIXTURE_COSTS: CostModel = {
+  entry_slippage_pct: 0.0005,
+  stop_slippage_pct: 0.0015,
+  fast_exit_slippage_pct: 0.0025,
+  fee_pct: 0.001,
+  spread_pct: 0.0005,
+};
+
+const CLUSTER_BY_SYMBOL: Record<string, string> = {
+  AAPL: 'megacap_tech',
+  MSFT: 'megacap_tech',
+  META: 'megacap_tech',
+  GOOGL: 'megacap_tech',
+  AMZN: 'megacap_tech',
+  NVDA: 'ai_cluster',
+  AMD: 'ai_cluster',
+  TSLA: 'ai_cluster',
+  SPY: 'etf_cluster',
+  QQQ: 'etf_cluster',
+};
+
+/** Correlation cluster for a symbol; unknowns fall back to 'misc'. */
+export function correlationClusterFor(symbol: string): string {
+  return CLUSTER_BY_SYMBOL[symbol.toUpperCase()] ?? 'misc';
+}
+
+/**
+ * Deterministic, gate-PASSING RunProposalArgs for `symbol`, fed by an in-memory
+ * FixtureFeed (no network). Quote, bars, regime, geometry and portfolio context
+ * are all fixed so runProposal builds a card that clears the risk gate every time.
+ */
+export function buildFixtureProposalInput(
+  symbol: string,
+  chatId: string,
+  telegram_user_id: string,
+): RunProposalArgs {
+  const sym = symbol.toUpperCase();
+  const now = Date.now();
+  const regime_date = new Date(now).toISOString().slice(0, 10);
+
+  const quote: Quote = { symbol: sym, price: 100, asOf: now, prevClose: 100 };
+
+  // Seed bars + quote so any getBars/getQuote runProposal makes resolves.
+  const bar: Bar = { t: now, o: 99, h: 101, l: 98, c: 100 };
+  const feed = new FixtureFeed(
+    'us_equity',
+    { [sym]: [bar, bar, bar] },
+    { [sym]: quote },
+  );
+
+  const build: Omit<BuildProposalInput, 'symbol' | 'quote'> = {
+    proposal_id: `prop_${sym}_${now}`,
+    asset_class: 'us_equity',
+    setup: 'trend_pullback',
+    direction: 'long',
+    entry_price: 100,
+    stop_price: 98,
+    target_price: 105,
+    regime: {
+      regime: 'trending_up',
+      adx_14: 31,
+      atr_ratio: 1.05,
+      price_above_ema20: true,
+      regime_date,
+    },
+    quality_score: 8,
+    setup_sample_size: 12,
+    strategy_health: 'green',
+    capital: 2500,
+    risk_pct: 0.005,
+    currency: 'USD',
+    correlation_cluster: correlationClusterFor(sym),
+    cluster_risk_pct_after: 0.005,
+    current_drawdown_pct: 0,
+    expected_hold_days: 5,
+    costs: FIXTURE_COSTS,
+    ai_thesis: 'Fixture: pullback to a rising 20EMA inside an established uptrend.',
+  };
+
+  const ctx: PortfolioContext = {
+    total_open_risk_pct: 0.005,
+    cluster_risk_pct: 0,
+    trades_this_week: 0,
+    consecutive_losses: 0,
+    current_drawdown_pct: 0,
+    strategy_health: 'green',
+    data_integrity_ok: true,
+    in_macro_blackout: false,
+    earnings_in_window: false,
+  };
+
+  return { symbol: sym, chatId, telegram_user_id, feed, build, ctx };
 }
 
 /**

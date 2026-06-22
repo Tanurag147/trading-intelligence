@@ -13,12 +13,18 @@ import {
   calculateRRRatio,
   minimumTarget,
 } from '@/lib/trading'
-import { resolveAndBurnCallback, loadProposalForCallback } from '@/lib/propose'
+import {
+  resolveAndBurnCallback,
+  loadProposalForCallback,
+  runProposal,
+  buildFixtureProposalInput,
+} from '@/lib/propose'
 import { decide } from '@/lib/decide'
 import { saveDecision } from '@/lib/persist'
 
 interface TelegramMessage {
   chat: { id: number }
+  from?: { id: number }
   text?: string
 }
 
@@ -41,6 +47,7 @@ const HELP_TEXT = `*Trading Intelligence — Commands*
 \`trading:size <asset> <entry> <stop> [capital]\` — position sizing
 \`trading:positions\` — open trades
 \`trading:brief\` — regime + open positions
+\`trading:propose <symbol>\` — generate a fixture proposal card
 \`trading:help\` — this message
 
 Default capital = $5000 AUD. Risk per trade = 2%.`
@@ -90,6 +97,7 @@ export async function POST(req: Request) {
     }
 
     const chatId = String(msg.chat.id)
+    const telegram_user_id = String(msg.from?.id ?? msg.chat.id)
     const raw = msg.text.trim()
     const stripped = raw.replace(/^trading:\s*/i, '')
     const [cmd, ...args] = stripped.split(/\s+/)
@@ -106,6 +114,9 @@ export async function POST(req: Request) {
         break
       case 'brief':
         await handleBrief(chatId)
+        break
+      case 'propose':
+        await handlePropose(chatId, args, telegram_user_id)
         break
       case 'help':
       case 'start':
@@ -379,4 +390,42 @@ async function handleBrief(chatId: string): Promise<void> {
     chatId,
     `*Brief — ${today}*\n\n*Regime*\n${regimeBlock}\n\n*Open*\n${positionsBlock}`
   )
+}
+
+// Symbols the fixture proposer will accept. Crypto/ASX/anything else is rejected
+// before runProposal is ever called.
+const PROPOSE_UNIVERSE: readonly string[] = [
+  'AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'GOOGL', 'TSLA', 'AMD', 'SPY', 'QQQ',
+]
+
+async function handlePropose(
+  chatId: string,
+  args: string[],
+  telegram_user_id: string,
+): Promise<void> {
+  const symbol = args[0]?.toUpperCase()
+  if (!symbol) {
+    await sendMessage(
+      chatId,
+      'Usage: `trading:propose SYMBOL` (e.g. `trading:propose AAPL`)'
+    )
+    return
+  }
+  if (!PROPOSE_UNIVERSE.includes(symbol)) {
+    await sendMessage(
+      chatId,
+      `⚠️ \`${symbol}\` is not in the proposal universe.\n\nAllowed: ${PROPOSE_UNIVERSE.join(', ')}`
+    )
+    return
+  }
+
+  try {
+    const proposalArgs = buildFixtureProposalInput(symbol, chatId, telegram_user_id)
+    // runProposal persists the proposal and, on pass, sends the card with
+    // approve/skip/snooze buttons; on fail it sends the plain reasons message.
+    await runProposal(proposalArgs)
+  } catch (err) {
+    console.error('propose failed', err)
+    await sendMessage(chatId, `⚠️ Couldn't build proposal for ${symbol}`)
+  }
 }
