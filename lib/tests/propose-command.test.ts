@@ -15,7 +15,9 @@ vi.mock('@/lib/telegram', () => ({
   regimeEmoji: () => '',
   answerCallbackQuery: vi.fn(),
   editMessageText: vi.fn(),
+  escapeHtml: (s: string) => s,
   formatProposalCard: () => 'CARD',
+  formatDecidedCard: () => 'CARD',
 }))
 vi.mock('@/lib/trading', () => ({
   calculatePositionSize: () => ({ units: 0, riskAmount: 0, riskPct: 0 }),

@@ -7,7 +7,7 @@ const {
   sendMessageMock,
   answerCallbackQueryMock,
   editMessageTextMock,
-  formatProposalCardMock,
+  formatDecidedCardMock,
   resolveAndBurnMock,
   loadProposalMock,
   saveDecisionMock,
@@ -15,7 +15,7 @@ const {
   sendMessageMock: vi.fn(),
   answerCallbackQueryMock: vi.fn(),
   editMessageTextMock: vi.fn(),
-  formatProposalCardMock: vi.fn(() => 'CARD'),
+  formatDecidedCardMock: vi.fn(() => 'CARD'),
   resolveAndBurnMock: vi.fn(),
   loadProposalMock: vi.fn(),
   saveDecisionMock: vi.fn(),
@@ -26,7 +26,8 @@ vi.mock('@/lib/telegram', () => ({
   regimeEmoji: () => '',
   answerCallbackQuery: answerCallbackQueryMock,
   editMessageText: editMessageTextMock,
-  formatProposalCard: formatProposalCardMock,
+  escapeHtml: (s: string) => s,
+  formatDecidedCard: formatDecidedCardMock,
 }));
 vi.mock('@/lib/trading', () => ({
   calculatePositionSize: () => ({ units: 0, riskAmount: 0, riskPct: 0 }),

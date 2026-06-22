@@ -50,24 +50,51 @@ export async function sendMessage(
 export type ProposalAction = 'approve' | 'skip' | 'snooze'
 
 /**
- * Human-readable Markdown summary of a proposal card. Exported so the callback
- * handler can re-render the same body when it locks in an outcome. The AI thesis
- * is placed on its own line (not wrapped in Markdown emphasis) to avoid breaking
- * legacy-Markdown parsing on stray underscores/asterisks in generated text.
+ * Escape a value for Telegram's HTML parse mode. HTML only treats `&`, `<`, `>`
+ * as special — so underscores/asterisks/etc. in proposal_id, setup, regime label,
+ * cluster, symbol or AI thesis are rendered literally and can never open a stray
+ * entity (the legacy-Markdown failure mode this card hit). Escape `&` first.
+ */
+export function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * Human-readable summary of a proposal card, rendered for Telegram's HTML parse
+ * mode. Exported so the callback handler can re-render the same body when it locks
+ * in an outcome. Every interpolated value is HTML-escaped; labels use <b> rather
+ * than Markdown emphasis. This makes underscore-bearing values (trend_pullback,
+ * trending_up, megacap_tech, prop_AAPL_<epoch>, …) and any '_'/'*' in the thesis
+ * completely safe — there is no entity parsing on the value text.
  */
 export function formatProposalCard(card: ProposalCard): string {
   const dir = card.direction === 'long' ? '🟢 LONG' : '🔴 SHORT'
+  const e = escapeHtml
   return [
-    `*Proposal — ${card.symbol}* (${card.setup})`,
+    `<b>Proposal — ${e(card.symbol)}</b> (${e(card.setup)})`,
     `${dir} · Quality ${card.quality_score}/10`,
-    `Regime: tier ${card.regime.tier} ${card.regime.label}`,
-    `Net ${card.expectancy.net_r}R (gross ${card.expectancy.gross_r}R) · sample: ${card.sample_confidence} (n=${card.setup_sample_size})`,
+    `Regime: tier ${card.regime.tier} ${e(card.regime.label)}`,
+    `Net ${card.expectancy.net_r}R (gross ${card.expectancy.gross_r}R) · sample: ${e(card.sample_confidence)} (n=${card.setup_sample_size})`,
     `Entry $${card.entry_price} · Stop $${card.exit.stop_price} · Target $${card.exit.target_price}`,
-    `Size ${card.position_size} · Risk ${card.risk_amount} ${card.currency}`,
-    `Cluster ${card.correlation_cluster} · Hold ~${card.expected_hold_days}d`,
+    `Size ${card.position_size} · Risk ${card.risk_amount} ${e(card.currency)}`,
+    `Cluster ${e(card.correlation_cluster)} · Hold ~${card.expected_hold_days}d`,
     ``,
-    card.ai_thesis,
+    e(card.ai_thesis),
   ].join('\n')
+}
+
+/**
+ * HTML body for a card locked to its decided outcome (used by editMessageText
+ * after a tap). The status label and timestamp are HTML-escaped; the card body
+ * is already escaped by formatProposalCard. Same parse mode as the initial send,
+ * so the post-decision rewrite can't 400 where the original succeeded.
+ */
+export function formatDecidedCard(
+  card: ProposalCard,
+  statusLabel: string,
+  decidedAtISO: string
+): string {
+  return `<b>${escapeHtml(statusLabel)}</b> · ${escapeHtml(decidedAtISO)}\n\n${formatProposalCard(card)}`
 }
 
 const ACTION_LABELS: Record<ProposalAction, string> = {
@@ -104,7 +131,7 @@ export async function sendProposalCard(
   const json = (await telegramApi('sendMessage', {
     chat_id: chatId,
     text: formatProposalCard(card),
-    parse_mode: 'Markdown',
+    parse_mode: 'HTML',
     disable_web_page_preview: true,
     reply_markup: { inline_keyboard: [buttons] },
   })) as { result?: { message_id?: number } }

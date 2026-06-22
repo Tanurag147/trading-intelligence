@@ -5,7 +5,8 @@ import {
   regimeEmoji,
   answerCallbackQuery,
   editMessageText,
-  formatProposalCard,
+  escapeHtml,
+  formatDecidedCard,
   type ProposalAction,
 } from '@/lib/telegram'
 import {
@@ -208,7 +209,8 @@ async function handleCallback(cq: TelegramCallbackQuery): Promise<void> {
       await editMessageText(
         chatId,
         messageId,
-        `⚠️ Proposal \`${proposal_id}\` — ${safe.toLowerCase()}. No action taken.`,
+        `⚠️ Proposal <code>${escapeHtml(proposal_id)}</code> — ${escapeHtml(safe.toLowerCase())}. No action taken.`,
+        'HTML',
       )
     }
     return
@@ -245,7 +247,8 @@ async function handleCallback(cq: TelegramCallbackQuery): Promise<void> {
       await editMessageText(
         chatId,
         messageId,
-        `⚠️ Proposal \`${proposal_id}\` — ${record.error ?? 'not actioned'}.`,
+        `⚠️ Proposal <code>${escapeHtml(proposal_id)}</code> — ${escapeHtml(record.error ?? 'not actioned')}.`,
+        'HTML',
       )
     }
     return
@@ -258,7 +261,8 @@ async function handleCallback(cq: TelegramCallbackQuery): Promise<void> {
     await editMessageText(
       chatId,
       messageId,
-      `*${confirm}* · ${stamp}\n\n${formatProposalCard(stored.card)}`,
+      formatDecidedCard(stored.card, confirm, stamp),
+      'HTML',
     )
   }
 }
