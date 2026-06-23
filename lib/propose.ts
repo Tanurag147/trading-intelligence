@@ -36,7 +36,7 @@ import { buildProposal, type BuildProposalInput } from './build-proposal';
 import { validateProposalRisk } from './risk-gate';
 import { saveProposal } from './persist';
 import { mintNonce, verifyAndBurnNonce, type NonceCheck } from './nonce';
-import { sendMessage, sendProposalCard, type ProposalAction } from './telegram';
+import { sendMessage, sendProposalCard, escapeHtml, type ProposalAction } from './telegram';
 import { FixtureFeed } from './feeds/fixture';
 import {
   DEFAULT_LIMITS,
@@ -79,12 +79,21 @@ export async function runProposal(args: RunProposalArgs): Promise<RunProposalRes
   // 3. persist EVERY proposal, passed or not.
   await saveProposal(card, gate);
 
-  // 4. failed card → plain reasons message, NO buttons.
+  // 4. failed card → plain reasons message, NO buttons. Rendered in HTML parse
+  //    mode (same path the card uses): block codes carry underscores
+  //    (net_expectancy_below_min, risk_per_trade_exceeded, cluster_risk_exceeded)
+  //    and details carry <, >, &, % — all of which open stray entities under
+  //    Markdown and 400 the send, leaving the founder with silence instead of
+  //    the rejection reasons. escapeHtml() both code and detail; HTML treats only
+  //    &/</> as special, so underscores render literally.
   if (!gate.passed) {
-    const reasons = gate.blocks.map((b) => `• ${b.code}: ${b.detail}`).join('\n');
+    const reasons = gate.blocks
+      .map((b) => `• ${escapeHtml(b.code)}: ${escapeHtml(b.detail)}`)
+      .join('\n');
     await sendMessage(
       args.chatId,
-      `🚫 *Proposal blocked — ${card.symbol}*\n\n${reasons}`,
+      `🚫 <b>Proposal blocked — ${escapeHtml(card.symbol)}</b>\n\n${reasons}`,
+      'HTML',
     );
     return { proposal_id: card.proposal_id, gate_passed: false, sent: false };
   }

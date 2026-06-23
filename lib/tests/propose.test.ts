@@ -9,16 +9,22 @@ const { saveProposalMock, mintNonceMock, sendMessageMock, sendProposalCardMock }
 }));
 vi.mock('../persist', () => ({ saveProposal: saveProposalMock, saveDecision: vi.fn() }));
 vi.mock('../nonce', () => ({ mintNonce: mintNonceMock }));
-vi.mock('../telegram', () => ({
-  sendMessage: sendMessageMock,
-  sendProposalCard: sendProposalCardMock,
-}));
+vi.mock('../telegram', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../telegram')>();
+  return {
+    sendMessage: sendMessageMock,
+    sendProposalCard: sendProposalCardMock,
+    // keep the real escapeHtml — the blocked path renders reasons in HTML
+    escapeHtml: actual.escapeHtml,
+  };
+});
 
 import { runProposal, type RunProposalArgs } from '../propose';
+import * as riskGate from '../risk-gate';
 import { FixtureFeed } from '../feeds/fixture';
 import type { BuildProposalInput, RegimeInput } from '../build-proposal';
 import type { PortfolioContext } from '../proposal';
-import type { CostModel } from '../proposal';
+import { DEFAULT_LIMITS, type CostModel, type RiskBlock } from '../proposal';
 import type { Quote } from '../feed';
 
 const COSTS: CostModel = {
@@ -88,6 +94,7 @@ function args(over: Partial<RunProposalArgs> = {}): RunProposalArgs {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   saveProposalMock.mockReset().mockResolvedValue(undefined);
   mintNonceMock.mockReset().mockImplementation(async (a: { action: string }) => `nonce_${a.action}`);
   sendMessageMock.mockReset().mockResolvedValue(undefined);
@@ -135,12 +142,57 @@ describe('runProposal — failing card', () => {
     expect(mintNonceMock).not.toHaveBeenCalled();
     expect(sendProposalCardMock).not.toHaveBeenCalled();
 
-    // a plain reasons message is sent instead
+    // a plain reasons message is sent instead, in HTML parse mode
     expect(sendMessageMock).toHaveBeenCalledTimes(1);
-    const [chatId, text] = sendMessageMock.mock.calls[0];
+    const [chatId, text, parseMode] = sendMessageMock.mock.calls[0];
     expect(chatId).toBe('555');
+    expect(parseMode).toBe('HTML');
     expect(text).toContain('blocked');
     expect(text).toContain('quality_below_min');
+  });
+
+  it('renders underscored block codes literally in HTML — no stray entities', async () => {
+    // Trip multiple underscore-bearing codes at once: net_expectancy_below_min,
+    // risk_per_trade_exceeded, cluster_risk_exceeded — the exact codes that
+    // 400'd the message under Markdown. risk_pct beyond the per-trade cap also
+    // pushes total + cluster open risk past their caps.
+    const res = await runProposal(
+      args({ build: buildPieces({ risk_pct: 0.09, target_price: 100.5 }) }),
+    );
+
+    expect(res.gate_passed).toBe(false);
+    expect(sendMessageMock).toHaveBeenCalledTimes(1);
+    const [, text, parseMode] = sendMessageMock.mock.calls[0];
+    expect(parseMode).toBe('HTML');
+
+    // underscored codes appear LITERALLY (underscores intact, not consumed as
+    // the opening of a Markdown entity)
+    expect(text).toContain('net_expectancy_below_min');
+    expect(text).toContain('risk_per_trade_exceeded');
+    expect(text).toContain('cluster_risk_exceeded');
+  });
+
+  it('escapes raw <, >, & in block details', async () => {
+    // A detail string carrying HTML-special chars must come through escaped.
+    const blocks: RiskBlock[] = [
+      { code: 'rr_below_min', detail: 'R:R 1 < required 2 & <stop>' },
+    ];
+    vi.spyOn(riskGate, 'validateProposalRisk').mockReturnValue({
+      passed: false,
+      blocks,
+      applied_limits: DEFAULT_LIMITS,
+      evaluated_at: 0,
+    });
+
+    await runProposal(args());
+
+    const [, text] = sendMessageMock.mock.calls[0];
+    // no raw HTML-special chars survive from the detail
+    expect(text).toContain('&lt;');
+    expect(text).toContain('&gt;');
+    expect(text).toContain('&amp;');
+    expect(text).not.toContain('<stop>');
+    expect(text).not.toContain(' & ');
   });
 
   it('throws if persistence fails (fail-closed)', async () => {
