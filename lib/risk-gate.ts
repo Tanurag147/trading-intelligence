@@ -86,8 +86,14 @@ export function validateProposalRisk(input: RiskGateInput): RiskGateResult {
   }
 
   // --- R:R from geometry (independent of the card's claimed gross_r) ---------
+  // Tolerate a tiny epsilon below min_rr: prices are rounded to 2dp, so an
+  // exactly-min_rr trade can realise e.g. 1.9999999998R from float division.
+  // Without this, a valid exactly-2R geometry is a false-negative block. (The
+  // geometry builder also rounds the target UP so the structural R:R is >=
+  // min_rr; this epsilon only absorbs the residual float noise.)
+  const RR_EPSILON = 1e-9;
   const rr = realisedRR(card.entry_price, card.exit.target_price, card.exit.stop_price, card.direction);
-  if (!Number.isFinite(rr) || rr < limits.min_rr) {
+  if (!Number.isFinite(rr) || rr < limits.min_rr - RR_EPSILON) {
     add('rr_below_min', `R:R ${Number.isFinite(rr) ? rr.toFixed(2) : 'NaN'} < required ${limits.min_rr}.`);
   }
 

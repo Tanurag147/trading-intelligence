@@ -92,6 +92,14 @@ describe('computeGeometry', () => {
     expect(target).toBeGreaterThan(100);
     expect(realisedRR(100, target, stop, 'long')).toBeCloseTo(2, 10);
   });
+
+  it('preserves >= 2R after 2dp rounding for an awkward entry/atr', () => {
+    // entry 247.33 / atr 1.337 realised only 1.995R under naive independent
+    // stop+target rounding — a false sub-2R. The target is now derived from the
+    // rounded stop and rounded UP, so realised R:R never falls below 2.0.
+    const { stop, target } = computeGeometry(247.33, 1.337);
+    expect(realisedRR(247.33, target, stop, 'long')).toBeGreaterThanOrEqual(2 - 1e-9);
+  });
 });
 
 // ---- buildRegimeFromBars (reuses regime.ts) --------------------------------

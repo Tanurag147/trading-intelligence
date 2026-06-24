@@ -45,6 +45,26 @@ describe('regime + quality + edge gates', () => {
     const r = validateProposalRisk({ card, ctx: cleanCtx() });
     expect(r.blocks.map((b) => b.code)).toContain('rr_below_min');
   });
+  it('does NOT block an exactly-2R trade that lands a float-hair under 2.0', () => {
+    // Real 2dp-rounded geometry (entry 256.79, stop 256.03, target 258.31):
+    // reward/risk is 2.0 in decimal but 1.9999999999998503 in float — a valid
+    // exactly-2R trade. The RR_EPSILON tolerance must let it pass.
+    const card = cleanCard();
+    card.entry_price = 256.79;
+    card.exit.stop_price = 256.03; // risk 0.76
+    card.exit.target_price = 258.31; // reward 1.52 => 2.0R (float 1.99999…)
+    expect(realisedRR(256.79, 258.31, 256.03, 'long')).toBeLessThan(2); // proves the hazard
+    const r = validateProposalRisk({ card, ctx: cleanCtx() });
+    expect(r.blocks.map((b) => b.code)).not.toContain('rr_below_min');
+  });
+  it('still blocks a genuine 1.9R (epsilon does not mask real shortfalls)', () => {
+    const card = cleanCard();
+    card.entry_price = 100;
+    card.exit.stop_price = 90; // risk 10
+    card.exit.target_price = 119; // reward 19 => 1.9R
+    const r = validateProposalRisk({ card, ctx: cleanCtx() });
+    expect(r.blocks.map((b) => b.code)).toContain('rr_below_min');
+  });
   it('blocks net expectancy below 0.25R', () => {
     const card = cleanCard();
     card.expectancy = { gross_r: 2.5, cost_r: 2.4, net_r: 0.1 };

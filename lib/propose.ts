@@ -289,17 +289,29 @@ export function atr14FromBars(bars: Bar[]): number {
   return atr;
 }
 
+/** Round UP to whole cents, collapsing float noise first so an already-exact
+ *  cent value isn't bumped a spurious extra cent. */
+function ceilToCents(x: number): number {
+  return Math.ceil(Number((x * 100).toFixed(6))) / 100;
+}
+
 /**
  * ATR-based long geometry (validation phase, long-only): risk a fixed 1.5×ATR,
- * target a clean 2R. Rounded to 2dp (equity prices). The gate independently
- * re-derives R:R from these prices, so the 2R intent must survive rounding —
- * with 1.5×ATR risk and 2× that as reward the ratio is exactly 2.0 before
- * rounding, and the rounding error is sub-cent.
+ * target a clean 2R. Prices round to 2dp (equity prices).
+ *
+ * The gate independently re-derives R:R from these prices and rejects anything
+ * below min_rr — so the 2R intent MUST survive rounding. Rounding stop and target
+ * independently to 2dp can shorten the reward and push realised R:R measurably
+ * below 2.0 (observed down to ~1.9935R), which is a false-negative block. To
+ * prevent that we derive the target from the POST-ROUNDING risk and round the
+ * target UP to cents, so realised R:R is always >= 2.0 (only float-division
+ * residual remains, which the gate's RR_EPSILON absorbs).
  */
 export function computeGeometry(entry: number, atr14: number): { stop: number; target: number } {
   const risk_per_unit = 1.5 * atr14;
   const stop = Number((entry - risk_per_unit).toFixed(2));
-  const target = Number((entry + 2.0 * risk_per_unit).toFixed(2));
+  const rounded_risk = entry - stop; // the risk the gate will actually see
+  const target = ceilToCents(entry + 2.0 * rounded_risk);
   return { stop, target };
 }
 
