@@ -362,9 +362,10 @@ export async function buildRealProposalInput(
   // REAL quality score from the SAME daily bars already fetched for regime/ATR
   // (no second getBars). The card's quality_score now does real work: the gate's
   // min_quality_score (8) blocks a tier-4 trending name whose pullback is weak or
-  // whose structure is broken with `quality_below_min`. See lib/quality.ts for the
-  // six-component breakdown + the honest ceiling note (two neutral placeholders
-  // cap the realistic max at 8).
+  // whose structure is broken with `quality_below_min`. scoreQuality currently
+  // scores the FOUR real components (trend, structure, pullback, liquidity) on a
+  // true 0–10 range — sector/market are pending and excluded — so the 8 bar is an
+  // honest "80% on what we measure". See lib/quality.ts SCORE_COMPONENT_MODE.
   const quality = scoreQuality(bars);
 
   const build: Omit<BuildProposalInput, 'symbol' | 'quote'> = {

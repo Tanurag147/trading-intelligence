@@ -54,13 +54,34 @@ function extendedBars(n: number, vol = 60_000_000): Bar[] {
   return out;
 }
 
-describe('scoreQuality — clean uptrend + shallow pullback', () => {
-  it('scores high (>= 7) with strong sub-scores', () => {
+/**
+ * A "merely okay" setup: clean trend/structure/pullback but THIN volume, so
+ * exactly one of the four real components (liquidity) is weak. Designed to land a
+ * four-component score of 7 — below the MIN_QUALITY=8 bar.
+ */
+function okayPullbackBars(n: number): Bar[] {
+  return cleanPullbackBars(n, 20_000); // ~$3M/day notional → liquidity ~2
+}
+
+describe('scoreQuality — clean uptrend + shallow pullback (all four real components high)', () => {
+  it('scores ~9 on the four real components and clears the 8 bar', () => {
     const q = scoreQuality(cleanPullbackBars(60));
-    expect(q.score).toBeGreaterThanOrEqual(7);
+    expect(q.score).toBeGreaterThanOrEqual(9); // four-component mean of a flawless setup
+    expect(q.score).toBeGreaterThanOrEqual(MIN_QUALITY); // PASSES the gate
     expect(q.trend_strength).toBeGreaterThanOrEqual(7);
     expect(q.pullback_quality).toBeGreaterThanOrEqual(7);
     expect(q.liquidity).toBeGreaterThanOrEqual(8); // megacap $ volume
+  });
+});
+
+describe('scoreQuality — merely-okay pullback (one weak real component)', () => {
+  it('lands 7 and is below the 8 threshold (would block)', () => {
+    const q = scoreQuality(okayPullbackBars(60));
+    expect(q.score).toBe(7); // one weak component (thin liquidity) drops it to 7
+    expect(q.score).toBeLessThan(MIN_QUALITY); // BLOCKED at the 8 bar
+    expect(q.liquidity).toBeLessThan(4); // the weak component
+    expect(q.trend_strength).toBeGreaterThanOrEqual(7); // the rest are fine
+    expect(q.pullback_quality).toBeGreaterThanOrEqual(7);
   });
 });
 
@@ -88,14 +109,21 @@ describe('scoreQuality — thin volume', () => {
   });
 });
 
-describe('scoreQuality — placeholders', () => {
-  it('sector_strength and market_alignment are exactly 5 and flagged in notes', () => {
+describe('scoreQuality — pending placeholders are reported but NOT in score', () => {
+  it('sector_strength and market_alignment are exactly 5, flagged pending, and do not move the score', () => {
     const q = scoreQuality(cleanPullbackBars(60));
     expect(q.sector_strength).toBe(5);
     expect(q.market_alignment).toBe(5);
-    expect(q.notes.toLowerCase()).toContain('placeholder');
+    expect(q.notes.toLowerCase()).toContain('pending');
     expect(q.notes).toContain('sector');
     expect(q.notes).toContain('market');
+
+    // proof they don't factor in: the score equals the mean of ONLY the four real
+    // components, independent of the placeholders' value.
+    const fourMean = Math.round(
+      (q.trend_strength + q.structure_quality + q.pullback_quality + q.liquidity) / 4,
+    );
+    expect(q.score).toBe(fourMean);
   });
 });
 
@@ -125,13 +153,15 @@ describe('scoreQuality — degenerate input is clamped, never NaN', () => {
   }
 });
 
-describe('scoreQuality — realComponentsOnly option (ceiling 10)', () => {
-  it('a flawless setup can reach 10 when placeholders are excluded', () => {
-    const six = scoreQuality(cleanPullbackBars(60));
-    const four = scoreQuality(cleanPullbackBars(60), { realComponentsOnly: true });
-    // excluding the two pinned-at-5 placeholders lifts the score for a strong setup
-    expect(four.score).toBeGreaterThanOrEqual(six.score);
-    expect(four.notes).toContain('4 real components');
+describe('scoreQuality — four-component default, six-component opt-in', () => {
+  it('default scores the four real components; the legacy six-component mode scores lower for a strong setup', () => {
+    const def = scoreQuality(cleanPullbackBars(60)); // DEFAULT = four real
+    const six = scoreQuality(cleanPullbackBars(60), { includePendingPlaceholders: true });
+    // a strong setup scores HIGHER under the four-real default than when the two
+    // pinned-at-5 placeholders drag the mean toward the 8.33 ceiling
+    expect(def.score).toBeGreaterThan(six.score);
+    expect(def.notes.toLowerCase()).toContain('pending');
+    expect(six.notes).toContain('all six');
   });
 });
 

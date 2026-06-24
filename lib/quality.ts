@@ -9,22 +9,29 @@
  * pullback now scores < 8 and is BLOCKED with `quality_below_min`. No gate change
  * is needed; the gate already reads min_quality_score.
  *
- * SIX components, EQUAL weight. FOUR are computed here from daily bars; TWO are
- * deliberate NEUTRAL PLACEHOLDERS pinned at 5 until external data is wired:
+ * SIX components, EQUAL weight WHEN ALL ARE REAL. FOUR are computed here from
+ * daily bars; TWO are not yet computable and are reported as neutral placeholders:
  *
  *   trend_strength     — computed (EMA20 slope + close-above-EMA consistency)
  *   structure_quality  — computed (higher-high / higher-low swing consistency)
  *   pullback_quality   — computed (retracement depth into a rising MA)
  *   liquidity          — computed (avg daily $ volume)
- *   sector_strength    — PLACEHOLDER 5 (needs sector-ETF regime data)
- *   market_alignment   — PLACEHOLDER 5 (needs SPY/QQQ regime data)
+ *   sector_strength    — PENDING 5 (needs sector-ETF regime data) — NOT in score
+ *   market_alignment   — PENDING 5 (needs SPY/QQQ regime data)   — NOT in score
  *
- * CEILING NOTE (important, honest): with two components pinned at 5, the maximum
- * achievable six-component score is (10·4 + 5·2)/6 = 8.33 → rounds to 8. So 8 is
- * BOTH the realistic ceiling AND the threshold — meaning only near-perfect setups
- * pass right now. This is intentional for v1 (be very selective) and documented.
- * `scoreQuality(bars, { realComponentsOnly: true })` scores ONLY the four real
- * components (mean of 4, true ceiling 10) as an alternative — see ScoreOptions.
+ * SCORING (current default): `score` is the rounded mean of ONLY the FOUR real
+ * components — a true 0–10 range. The two pending components are still reported in
+ * the breakdown (value 5, flagged "pending") but DO NOT factor into `score`.
+ *
+ * WHY four, not six: two components frozen at 5 distort a six-component mean — the
+ * ceiling becomes (10·4 + 5·2)/6 = 8.33, so the MIN_QUALITY=8 bar would mean
+ * "near-perfect only" as an artifact of the placeholders, not a real quality bar.
+ * Scoring the four real components keeps the threshold at an honest 8 ("80% on
+ * what we actually measure") without eroding discipline by lowering it.
+ *
+ * MIGRATION POINT — see SCORE_COMPONENT_MODE below: when sector_strength and
+ * market_alignment become real, flip the mode to 'six' (a one-line change) so all
+ * six factor in, then re-evaluate whether 8 is still the right threshold.
  *
  * PURE: scoreQuality has no I/O. All heuristics are simple, transparent, and
  * documented so a human can audit why a setup scored what it did. This file does
@@ -40,26 +47,33 @@ import type { Bar } from './feed';
 export const MIN_QUALITY = 8;
 
 export interface QualityBreakdown {
-  trend_strength: number; // 0–10 sub-score (computed)
-  structure_quality: number; // 0–10 (computed)
-  pullback_quality: number; // 0–10 (computed)
-  liquidity: number; // 0–10 (computed)
-  sector_strength: number; // PLACEHOLDER: fixed 5 (neutral), flagged in notes
-  market_alignment: number; // PLACEHOLDER: fixed 5 (neutral), flagged in notes
-  score: number; // 1–10 final (equal-weight mean, rounded, clamped)
-  notes: string; // short human summary incl. which components are placeholders
+  trend_strength: number; // 0–10 sub-score (computed, IN score)
+  structure_quality: number; // 0–10 (computed, IN score)
+  pullback_quality: number; // 0–10 (computed, IN score)
+  liquidity: number; // 0–10 (computed, IN score)
+  sector_strength: number; // PENDING: fixed 5, NOT in score (flagged in notes)
+  market_alignment: number; // PENDING: fixed 5, NOT in score (flagged in notes)
+  score: number; // 1–10 final (mean of the four real components, rounded, clamped)
+  notes: string; // short human summary incl. which components are pending
 }
 
 export interface ScoreOptions {
   /**
-   * When true, `score` is the rounded mean of ONLY the four computed components
-   * (trend, structure, pullback, liquidity) — true ceiling 10. The placeholder
-   * fields are still reported as 5 and flagged in notes, they just don't dilute
-   * the score. Default false → score the full six (placeholders included), whose
-   * realistic ceiling is 8 (see file header CEILING NOTE).
+   * Force the legacy six-component mean (the four real components + the two
+   * pending placeholders pinned at 5). Provided for parity/experiments only; the
+   * DEFAULT is the four-real-component mean (SCORE_COMPONENT_MODE === 'four').
+   * Equivalent to setting mode to 'six' for a single call.
    */
-  realComponentsOnly?: boolean;
+  includePendingPlaceholders?: boolean;
 }
+
+/**
+ * MIGRATION POINT. Today only four components are real, so `score` is their mean
+ * (true 0–10 range, honest 8 threshold). When sector_strength and market_alignment
+ * become real, flip this to 'six' — a ONE-LINE change — so all six factor in with
+ * equal weight, then re-evaluate MIN_QUALITY / DEFAULT_LIMITS.min_quality_score.
+ */
+export const SCORE_COMPONENT_MODE: 'four' | 'six' = 'four';
 
 const SECTOR_PLACEHOLDER = 5;
 const MARKET_PLACEHOLDER = 5;
@@ -273,8 +287,10 @@ export function scoreQuality(bars: Bar[], opts: ScoreOptions = {}): QualityBreak
       liquidity: MARKET_PLACEHOLDER,
       sector_strength: SECTOR_PLACEHOLDER,
       market_alignment: MARKET_PLACEHOLDER,
-      score: 5,
-      notes: 'Quality 5/10: no bars — all components neutral. sector/market are placeholders (not yet computed).',
+      score: 5, // mean of four neutral real components
+      notes:
+        'Quality 5/10: no bars — the four real components default to neutral. ' +
+        'sector/market pending — not yet in score.',
     };
   }
 
@@ -284,22 +300,26 @@ export function scoreQuality(bars: Bar[], opts: ScoreOptions = {}): QualityBreak
   const liq = liquidity(bars);
   const liquidityScore = clamp(liq.score, 0, 10);
 
+  // DEFAULT: score the FOUR real components (true 0–10 range). The two pending
+  // placeholders are reported but excluded. Flip to 'six' (or pass
+  // includePendingPlaceholders) only once sector/market are real — see
+  // SCORE_COMPONENT_MODE.
   const real = [trend, structure, pullback, liquidityScore];
-  const six = [...real, SECTOR_PLACEHOLDER, MARKET_PLACEHOLDER];
-  const basis = opts.realComponentsOnly ? real : six;
+  const useSix = opts.includePendingPlaceholders ?? SCORE_COMPONENT_MODE === 'six';
+  const basis = useSix ? [...real, SECTOR_PLACEHOLDER, MARKET_PLACEHOLDER] : real;
   const score = clamp(Math.round(mean(basis)), 1, 10);
 
   const r = (n: number): number => Math.round(n);
   const liqNote = liq.hadVolume ? `${r(liquidityScore)}` : `${r(liquidityScore)} (no vol→neutral)`;
-  const basisNote = opts.realComponentsOnly
-    ? '4 real components only (placeholders excluded; ceiling 10)'
-    : 'equal-weight mean of 6 (sector/market pinned at 5; realistic ceiling 8)';
+  const scopeNote = useSix
+    ? 'mean of all six (sector/market now in score)'
+    : 'mean of the four real components; sector/market pending — not yet in score';
 
   const notes =
-    `Quality ${score}/10: trend ${r(trend)}, structure ${r(structure)}, ` +
-    `pullback ${r(pullback)}, liquidity ${liqNote}, sector n/a(5), market n/a(5). ` +
-    `sector_strength & market_alignment are NEUTRAL PLACEHOLDERS — not yet computed ` +
-    `(need sector-ETF + SPY regime data). Scored as ${basisNote}.`;
+    `Quality ${score}/10 (trend ${r(trend)}, structure ${r(structure)}, ` +
+    `pullback ${r(pullback)}, liquidity ${liqNote}; sector/market pending). ` +
+    `sector_strength & market_alignment are PENDING placeholders (need sector-ETF ` +
+    `+ SPY regime data); scored as ${scopeNote}.`;
 
   return {
     trend_strength: trend,
