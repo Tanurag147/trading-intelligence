@@ -18,14 +18,13 @@ import {
   resolveAndBurnCallback,
   loadProposalForCallback,
   runProposal,
-  buildFixtureProposalInput,
+  buildRealProposalInput,
+  postEntryBars,
 } from '@/lib/propose'
 import { decide } from '@/lib/decide'
 import { saveDecision } from '@/lib/persist'
 import { runShadowTracker } from '@/lib/shadow-tracker'
-import { FixtureFeed } from '@/lib/feeds/fixture'
-import type { Bar } from '@/lib/feed'
-import type { ProposalCard } from '@/lib/proposal'
+import { AlpacaFeed } from '@/lib/feeds/alpaca'
 
 interface TelegramMessage {
   chat: { id: number }
@@ -432,7 +431,9 @@ async function handlePropose(
   }
 
   try {
-    const proposalArgs = buildFixtureProposalInput(symbol, chatId, telegram_user_id)
+    // ONE AlpacaFeed instance, reused by buildRealProposalInput and runProposal.
+    const feed = new AlpacaFeed()
+    const proposalArgs = await buildRealProposalInput(symbol, chatId, telegram_user_id, feed)
     // runProposal persists the proposal and, on pass, sends the card with
     // approve/skip/snooze buttons; on fail it sends the plain reasons message.
     await runProposal(proposalArgs)
@@ -442,43 +443,28 @@ async function handlePropose(
   }
 }
 
-// Deterministic forward bars that walk price UP through the card's target so a
-// long phantom actually resolves (target_hit). Paper-phase stand-in for a real
-// post-entry feed — no network. Lows never reach the stop, so the demo always
-// produces a resolved row rather than running out of bars.
-function shadowForwardBars(card: ProposalCard): Bar[] {
-  const t0 = card.created_at
-  const day = 24 * 60 * 60 * 1000
-  const entry = card.entry_price
-  const target = card.exit.target_price
-  const span = target - entry
-  return [
-    { t: t0 + day, o: entry, h: entry + span * 0.4, l: entry - 0.5, c: entry + span * 0.3 },
-    { t: t0 + 2 * day, o: entry + span * 0.3, h: entry + span * 0.8, l: entry, c: entry + span * 0.7 },
-    { t: t0 + 3 * day, o: entry + span * 0.7, h: target + Math.abs(span) * 0.2 + 1, l: entry + span * 0.5, c: target },
-  ]
-}
-
-// A FixtureFeed seeded with the forward series for THIS card's symbol, so the
-// bars are fetched through the MarketFeed contract (not a bare array).
-function shadowFixtureFeed(card: ProposalCard): FixtureFeed {
-  return new FixtureFeed(
-    'us_equity',
-    { [card.symbol]: shadowForwardBars(card) },
-    { [card.symbol]: { symbol: card.symbol, price: card.entry_price, asOf: card.created_at, prevClose: card.entry_price } },
-  )
-}
-
 async function handleShadows(chatId: string): Promise<void> {
-  const summary = await runShadowTracker({
-    feed: new FixtureFeed('us_equity', {}, {}),
-    barsFor: async (card) => shadowFixtureFeed(card).getBars(card.symbol, '1d', 16),
-  })
+  try {
+    // Real post-entry bars from Alpaca. barsFor pulls daily bars and keeps only
+    // those STRICTLY after the proposal's entry; if too few have accrued yet the
+    // phantom stays 'open' and resolves on a later run as more bars arrive.
+    const feed = new AlpacaFeed()
+    const summary = await runShadowTracker({
+      feed,
+      barsFor: async (card) => {
+        const bars = await feed.getBars(card.symbol, '1d', 120)
+        return postEntryBars(bars, card.created_at)
+      },
+    })
 
-  const failNote = summary.failures.length > 0 ? ` · ${summary.failures.length} failed` : ''
-  await sendMessage(
-    chatId,
-    `<b>Shadow tracker</b>: scanned ${summary.scanned}, resolved ${summary.resolved}, still open ${summary.still_open}${failNote}`,
-    'HTML'
-  )
+    const failNote = summary.failures.length > 0 ? ` · ${summary.failures.length} failed` : ''
+    await sendMessage(
+      chatId,
+      `<b>Shadow tracker</b>: scanned ${summary.scanned}, resolved ${summary.resolved}, still open ${summary.still_open}${failNote}`,
+      'HTML'
+    )
+  } catch (err) {
+    console.error('shadows failed', err)
+    await sendMessage(chatId, '⚠️ Shadow tracker run failed')
+  }
 }

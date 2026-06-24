@@ -1,14 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-// Mock the route's I/O edges. @/lib/propose is mocked with importActual so
-// buildFixtureProposalInput (and the rest) stay REAL while runProposal is a spy —
+// Mock the route's I/O edges. @/lib/propose is mocked with importActual so the
+// pure helpers stay REAL while runProposal AND buildRealProposalInput are spies —
 // that lets us assert the command wires a real, symbol-bound args object into
-// runProposal without actually persisting or sending anything.
-const { sendMessageMock, runProposalMock } = vi.hoisted(() => ({
+// runProposal without touching the live Alpaca feed, persisting, or sending.
+const { sendMessageMock, runProposalMock, buildRealMock } = vi.hoisted(() => ({
   sendMessageMock: vi.fn(),
   runProposalMock: vi.fn(),
+  buildRealMock: vi.fn(),
 }))
 
+// Stub AlpacaFeed so `new AlpacaFeed()` needs no env keys / network in CI.
+vi.mock('@/lib/feeds/alpaca', () => ({ AlpacaFeed: class FakeAlpacaFeed {} }))
 vi.mock('@/lib/supabase', () => ({ supabase: { from: vi.fn() } }))
 vi.mock('@/lib/telegram', () => ({
   sendMessage: sendMessageMock,
@@ -28,7 +31,7 @@ vi.mock('@/lib/persist', () => ({ saveDecision: vi.fn(), saveProposal: vi.fn() }
 vi.mock('@/lib/nonce', () => ({ mintNonce: vi.fn(), verifyAndBurnNonce: vi.fn() }))
 vi.mock('@/lib/propose', async () => {
   const actual = await vi.importActual<typeof import('@/lib/propose')>('@/lib/propose')
-  return { ...actual, runProposal: runProposalMock }
+  return { ...actual, runProposal: runProposalMock, buildRealProposalInput: buildRealMock }
 })
 
 import { POST } from '@/app/api/telegram/route'
@@ -50,6 +53,18 @@ let warnSpy: ReturnType<typeof vi.spyOn>
 beforeEach(() => {
   sendMessageMock.mockReset().mockResolvedValue(undefined)
   runProposalMock.mockReset().mockResolvedValue({ proposal_id: 'x', gate_passed: true, sent: true })
+  // buildRealProposalInput echoes its inputs back as the args object so we can
+  // assert the symbol/chat/user the command extracted reach runProposal.
+  buildRealMock
+    .mockReset()
+    .mockImplementation(async (symbol: string, chatId: string, telegram_user_id: string, feed: unknown) => ({
+      symbol,
+      chatId,
+      telegram_user_id,
+      feed,
+      build: {},
+      ctx: {},
+    }))
   errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
 })

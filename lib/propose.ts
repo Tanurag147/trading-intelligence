@@ -32,7 +32,8 @@
  */
 
 import { supabase } from './supabase';
-import { buildProposal, type BuildProposalInput } from './build-proposal';
+import { buildProposal, type BuildProposalInput, type RegimeInput } from './build-proposal';
+import { calculateRegime } from './regime';
 import { validateProposalRisk } from './risk-gate';
 import { saveProposal } from './persist';
 import { mintNonce, verifyAndBurnNonce, type NonceCheck } from './nonce';
@@ -206,6 +207,175 @@ export function buildFixtureProposalInput(
 
   const ctx: PortfolioContext = {
     total_open_risk_pct: 0.005,
+    cluster_risk_pct: 0,
+    trades_this_week: 0,
+    consecutive_losses: 0,
+    current_drawdown_pct: 0,
+    strategy_health: 'green',
+    data_integrity_ok: true,
+    in_macro_blackout: false,
+    earnings_in_window: false,
+  };
+
+  return { symbol: sym, chatId, telegram_user_id, feed, build, ctx };
+}
+
+// ----------------------------------------------------------------------------
+// REAL-DATA wiring (Trading OS v3). The fixture above is the deterministic
+// stand-in; the helpers below turn a live MarketFeed (AlpacaFeed) into the same
+// RunProposalArgs shape using REAL bars, REAL regime (reusing regime.ts — not a
+// reimplementation), and REAL ATR-based geometry. No new indicator math: regime
+// labelling stays in calculateRegime; we only compute the ATR the stop needs
+// (regime.ts doesn't expose it) with the SAME Wilder method it uses internally.
+// ----------------------------------------------------------------------------
+
+/** Bar[] -> the [ts,o,h,l,c] tuple shape calculateRegime aggregates/consumes. */
+function barsToOhlcTuples(bars: Bar[]): [number, number, number, number, number][] {
+  return bars.map((b) => [b.t, b.o, b.h, b.l, b.c]);
+}
+
+/**
+ * Run real bars through the regime engine and return the decoupled RegimeInput
+ * the proposal pipeline consumes (toRegimeView -> mapRegimeToTier). Pure given
+ * bars — calculateRegime owns all indicator math; we only reshape its result.
+ */
+export function regimeInputFromBars(symbol: string, bars: Bar[]): RegimeInput {
+  const r = calculateRegime(symbol, barsToOhlcTuples(bars));
+  return {
+    regime: r.regime,
+    adx_14: r.adx_14,
+    atr_ratio: r.atr_ratio,
+    price_above_ema20: r.price_above_ema20,
+    regime_date: r.regime_date,
+  };
+}
+
+/**
+ * Fetch daily bars off the feed and derive a real RegimeInput. lookback 60 ≫ the
+ * 28-candle minimum regime.ts enforces (AlpacaFeed over-fetches by date, so this
+ * survives holidays/weekends). A real 'trending_up' -> tier 4 (eligible);
+ * anything else -> a blocked tier. No new regime logic.
+ */
+export async function buildRegimeFromBars(symbol: string, feed: MarketFeed): Promise<RegimeInput> {
+  const bars = await feed.getBars(symbol, '1d', 60);
+  return regimeInputFromBars(symbol, bars);
+}
+
+/**
+ * Wilder ATR(14) from daily bars — the SAME true-range + Wilder smoothing
+ * regime.ts uses internally (it just doesn't expose the value). Bars are sorted
+ * ascending defensively. Throws if there aren't enough bars to seed the average.
+ */
+export function atr14FromBars(bars: Bar[]): number {
+  const period = 14;
+  const ordered = [...bars].sort((a, b) => a.t - b.t);
+  if (ordered.length < period + 1) {
+    throw new Error(`atr14FromBars: need >= ${period + 1} bars, got ${ordered.length}`);
+  }
+  const tr: number[] = [];
+  for (let i = 1; i < ordered.length; i++) {
+    const cur = ordered[i];
+    const prev = ordered[i - 1];
+    tr.push(
+      Math.max(cur.h - cur.l, Math.abs(cur.h - prev.c), Math.abs(cur.l - prev.c)),
+    );
+  }
+  let atr = 0;
+  for (let i = 0; i < period; i++) atr += tr[i];
+  atr = atr / period; // Wilder seed = simple average of the first `period` TRs
+  for (let i = period; i < tr.length; i++) {
+    atr = (atr * (period - 1) + tr[i]) / period;
+  }
+  return atr;
+}
+
+/**
+ * ATR-based long geometry (validation phase, long-only): risk a fixed 1.5×ATR,
+ * target a clean 2R. Rounded to 2dp (equity prices). The gate independently
+ * re-derives R:R from these prices, so the 2R intent must survive rounding —
+ * with 1.5×ATR risk and 2× that as reward the ratio is exactly 2.0 before
+ * rounding, and the rounding error is sub-cent.
+ */
+export function computeGeometry(entry: number, atr14: number): { stop: number; target: number } {
+  const risk_per_unit = 1.5 * atr14;
+  const stop = Number((entry - risk_per_unit).toFixed(2));
+  const target = Number((entry + 2.0 * risk_per_unit).toFixed(2));
+  return { stop, target };
+}
+
+/** Post-entry forward bars for a shadow phantom: only bars STRICTLY after the
+ *  proposal's created_at. Too-recent proposals yield too few bars and the shadow
+ *  correctly stays 'open' until more accrue. Pure + exported so it's unit-tested. */
+export function postEntryBars(bars: Bar[], createdAt: number): Bar[] {
+  return bars.filter((b) => b.t > createdAt);
+}
+
+/**
+ * REAL RunProposalArgs for `symbol`, fed by a live MarketFeed (AlpacaFeed). Real
+ * entry (latest trade price), real regime, real ATR stop. Fetches daily bars
+ * ONCE and reuses them for both regime and ATR (no double getBars).
+ *
+ * PLACEHOLDERS still in place (flagged for later steps):
+ *  - quality_score: fixed 8 — real quality scoring is a later step, NOT faked here.
+ *  - ctx: a clean passing PortfolioContext — real portfolio-state wiring (open
+ *    risk, drawdown, weekly cadence, blackout/earnings) is a later step.
+ *  - setup/setup_sample_size/strategy_health: fixed — setup classification + live
+ *    stats are later steps too.
+ */
+export async function buildRealProposalInput(
+  symbol: string,
+  chatId: string,
+  telegram_user_id: string,
+  feed: MarketFeed,
+): Promise<RunProposalArgs> {
+  const sym = symbol.toUpperCase();
+
+  // Fetch bars ONCE; derive both regime and ATR from the same series.
+  const bars = await feed.getBars(sym, '1d', 60);
+  const regimeInput = regimeInputFromBars(sym, bars);
+  const atr = atr14FromBars(bars);
+
+  // Entry = latest TRADE price (AlpacaFeed.getQuote guards zero/missing; we
+  // double-check fail-closed because a 0 entry corrupts sizing + R math).
+  const quote = await feed.getQuote(sym);
+  const entry = quote.price;
+  if (!(typeof entry === 'number' && Number.isFinite(entry) && entry > 0)) {
+    throw new Error(`buildRealProposalInput: no valid entry price for ${sym}`);
+  }
+
+  const { stop, target } = computeGeometry(entry, atr);
+  const risk_per_unit = 1.5 * atr;
+
+  const build: Omit<BuildProposalInput, 'symbol' | 'quote'> = {
+    proposal_id: `prop_${sym}_${Date.now()}`,
+    asset_class: 'us_equity',
+    setup: 'trend_pullback',
+    direction: 'long',
+    entry_price: entry,
+    stop_price: stop,
+    target_price: target,
+    regime: regimeInput,
+    quality_score: 8, // PLACEHOLDER — real quality scoring is a later step.
+    setup_sample_size: 12, // PLACEHOLDER — live setup stats not wired yet.
+    strategy_health: 'green', // PLACEHOLDER — live strategy-health not wired yet.
+    capital: 2500,
+    risk_pct: 0.005,
+    currency: 'USD',
+    correlation_cluster: correlationClusterFor(sym),
+    cluster_risk_pct_after: 0.005,
+    current_drawdown_pct: 0,
+    expected_hold_days: 5,
+    costs: FIXTURE_COSTS, // the pessimistic CostModel
+    ai_thesis:
+      `Long ${sym} in a ${regimeInput.regime} regime ` +
+      `(ADX ${regimeInput.adx_14}, ${regimeInput.price_above_ema20 ? 'price>EMA20' : 'price<EMA20'}). ` +
+      `Entry ${entry}; ATR(14) ${atr.toFixed(2)} → 1.5×ATR stop ${stop} ` +
+      `(${risk_per_unit.toFixed(2)}/unit risk), 2R target ${target}.`,
+  };
+
+  // PLACEHOLDER — clean passing context; live portfolio state wiring comes later.
+  const ctx: PortfolioContext = {
+    total_open_risk_pct: 0,
     cluster_risk_pct: 0,
     trades_this_week: 0,
     consecutive_losses: 0,
