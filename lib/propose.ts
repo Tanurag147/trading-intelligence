@@ -39,6 +39,7 @@ import { saveProposal } from './persist';
 import { mintNonce, verifyAndBurnNonce, type NonceCheck } from './nonce';
 import { sendMessage, sendProposalCard, escapeHtml, type ProposalAction } from './telegram';
 import { FixtureFeed } from './feeds/fixture';
+import { scoreQuality } from './quality';
 import {
   DEFAULT_LIMITS,
   type ProposalCard,
@@ -358,6 +359,14 @@ export async function buildRealProposalInput(
   const { stop, target } = computeGeometry(entry, atr);
   const risk_per_unit = 1.5 * atr;
 
+  // REAL quality score from the SAME daily bars already fetched for regime/ATR
+  // (no second getBars). The card's quality_score now does real work: the gate's
+  // min_quality_score (8) blocks a tier-4 trending name whose pullback is weak or
+  // whose structure is broken with `quality_below_min`. See lib/quality.ts for the
+  // six-component breakdown + the honest ceiling note (two neutral placeholders
+  // cap the realistic max at 8).
+  const quality = scoreQuality(bars);
+
   const build: Omit<BuildProposalInput, 'symbol' | 'quote'> = {
     proposal_id: `prop_${sym}_${Date.now()}`,
     asset_class: 'us_equity',
@@ -367,7 +376,7 @@ export async function buildRealProposalInput(
     stop_price: stop,
     target_price: target,
     regime: regimeInput,
-    quality_score: 8, // PLACEHOLDER — real quality scoring is a later step.
+    quality_score: quality.score, // REAL 1–10 from daily bars (was hardcoded 8).
     setup_sample_size: 12, // PLACEHOLDER — live setup stats not wired yet.
     strategy_health: 'green', // PLACEHOLDER — live strategy-health not wired yet.
     capital: 2500,
@@ -382,7 +391,8 @@ export async function buildRealProposalInput(
       `Long ${sym} in a ${regimeInput.regime} regime ` +
       `(ADX ${regimeInput.adx_14}, ${regimeInput.price_above_ema20 ? 'price>EMA20' : 'price<EMA20'}). ` +
       `Entry ${entry}; ATR(14) ${atr.toFixed(2)} → 1.5×ATR stop ${stop} ` +
-      `(${risk_per_unit.toFixed(2)}/unit risk), 2R target ${target}.`,
+      `(${risk_per_unit.toFixed(2)}/unit risk), 2R target ${target}. ` +
+      quality.notes,
   };
 
   // PLACEHOLDER — clean passing context; live portfolio state wiring comes later.

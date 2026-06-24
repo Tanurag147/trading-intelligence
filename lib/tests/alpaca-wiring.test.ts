@@ -9,6 +9,7 @@ import {
 import { buildProposal, toRegimeView } from '../build-proposal';
 import { validateProposalRisk } from '../risk-gate';
 import { realisedRR } from '../risk-gate';
+import { scoreQuality, MIN_QUALITY } from '../quality';
 import { FixtureFeed } from '../feeds/fixture';
 import type { MarketFeed, Bar } from '../feed';
 import type { PortfolioContext } from '../proposal';
@@ -30,6 +31,30 @@ function trendingBars(n: number): Bar[] {
   for (let i = 0; i < n; i++) {
     const close = 100 + i;
     out.push(bar(i, close - 0.5, close + 0.5, close - 0.5, close));
+  }
+  return out;
+}
+
+/**
+ * A high-QUALITY trend-pullback series for the gate-pass test: a steady uptrend
+ * into a shallow ~40% pullback that holds above a rising MA, on megacap $ volume.
+ * Since buildRealProposalInput now scores quality from these bars (was hardcoded
+ * 8), the gate-pass test needs bars that genuinely score >= MIN_QUALITY — a thin,
+ * extended straight line correctly scores ~5 and would now be BLOCKED.
+ */
+function qualityPullbackBars(n: number, vol = 60_000_000): Bar[] {
+  const out: Bar[] = [];
+  const pullbackBars = 4;
+  const peakIdx = n - pullbackBars - 1;
+  for (let i = 0; i <= peakIdx; i++) {
+    const c = 100 + i;
+    out.push({ t: BASE + i * DAY, o: c - 0.6, h: c + 0.6, l: c - 0.6, c, v: vol });
+  }
+  const peak = 100 + peakIdx;
+  const drop = 0.4 * 20;
+  for (let k = 1; k <= pullbackBars; k++) {
+    const c = peak - drop * (k / pullbackBars);
+    out.push({ t: BASE + (peakIdx + k) * DAY, o: c + 0.3, h: c + 0.6, l: c - 0.6, c, v: vol });
   }
   return out;
 }
@@ -118,15 +143,22 @@ describe('buildRegimeFromBars', () => {
 
 // ---- buildRealProposalInput -------------------------------------------------
 describe('buildRealProposalInput', () => {
-  it('produces a card that PASSES the gate with clean ctx (real entry/regime/ATR)', async () => {
-    const feed = mockFeed(trendingBars(60), 200);
+  it('produces a card that PASSES the gate with clean ctx (real entry/regime/ATR/quality)', async () => {
+    const bars = qualityPullbackBars(60);
+    const feed = mockFeed(bars, 200);
     const a = await buildRealProposalInput('AAPL', 'chat', 'user', feed);
 
-    // real entry from the quote; ATR(14)=1.5 -> 1.5*ATR risk = 2.25
+    // real entry from the quote; geometry derived from the bars' real ATR
     expect(a.build.entry_price).toBe(200);
-    expect(a.build.stop_price).toBe(197.75); // 200 - 2.25
-    expect(a.build.target_price).toBe(204.5); // 200 + 4.5
+    const { stop, target } = computeGeometry(200, atr14FromBars(bars));
+    expect(a.build.stop_price).toBe(stop);
+    expect(a.build.target_price).toBe(target);
     expect(a.build.regime.regime).toBe('trending_up');
+
+    // quality is REAL now (not hardcoded 8): the card carries scoreQuality(bars)
+    // and it clears MIN_QUALITY, which is WHY the gate passes.
+    expect(a.build.quality_score).toBe(scoreQuality(bars).score);
+    expect(a.build.quality_score).toBeGreaterThanOrEqual(MIN_QUALITY);
 
     // build the card the same way runProposal would, then gate it
     const quote = await feed.getQuote('AAPL');
@@ -137,6 +169,25 @@ describe('buildRealProposalInput', () => {
 
     // the feed is threaded through for runProposal to reuse
     expect(a.feed).toBe(feed);
+  });
+
+  it('BLOCKS a low-quality tier-4 setup: trending regime but extended/thin bars', async () => {
+    // Same trending_up regime, but a thin-volume straight line with NO pullback —
+    // scores < MIN_QUALITY. This is the engine making the system selective: a
+    // valid regime is no longer enough; the setup geometry must also be clean.
+    const bars = trendingBars(60); // v=1000 (thin), extended at the high
+    const feed = mockFeed(bars, 200);
+    const a = await buildRealProposalInput('AAPL', 'chat', 'user', feed);
+
+    expect(a.build.regime.regime).toBe('trending_up'); // regime IS eligible
+    expect(a.build.quality_score).toBe(scoreQuality(bars).score);
+    expect(a.build.quality_score).toBeLessThan(MIN_QUALITY); // but quality is not
+
+    const quote = await feed.getQuote('AAPL');
+    const card = buildProposal({ ...a.build, symbol: a.symbol, quote });
+    const gate = validateProposalRisk({ card, ctx: a.ctx });
+    expect(gate.passed).toBe(false);
+    expect(gate.blocks.map((b) => b.code)).toContain('quality_below_min');
   });
 
   it('throws if the quote price is 0 (zero-price double-check, fail-closed)', async () => {
