@@ -25,6 +25,7 @@ import { decide } from '@/lib/decide'
 import { saveDecision } from '@/lib/persist'
 import { runShadowTracker } from '@/lib/shadow-tracker'
 import { AlpacaFeed } from '@/lib/feeds/alpaca'
+import { runScan } from '@/lib/scanner'
 
 interface TelegramMessage {
   chat: { id: number }
@@ -52,6 +53,7 @@ const HELP_TEXT = `*Trading Intelligence — Commands*
 \`trading:positions\` — open trades
 \`trading:brief\` — regime + open positions
 \`trading:propose <symbol>\` — generate a fixture proposal card
+\`trading:scan\` — run the watchlist scanner now (auto-proposals)
 \`trading:shadows\` — resolve pending shadow (phantom) trades
 \`trading:help\` — this message
 
@@ -122,6 +124,9 @@ export async function POST(req: Request) {
         break
       case 'propose':
         await handlePropose(chatId, args, telegram_user_id)
+        break
+      case 'scan':
+        await handleScan(chatId, telegram_user_id)
         break
       case 'shadows':
         await handleShadows(chatId)
@@ -440,6 +445,26 @@ async function handlePropose(
   } catch (err) {
     console.error('propose failed', err)
     await sendMessage(chatId, `⚠️ Couldn't build proposal for ${symbol}`)
+  }
+}
+
+async function handleScan(chatId: string, telegram_user_id: string): Promise<void> {
+  try {
+    // Manual on-demand run of the SAME scanner the cron uses. Sends nothing
+    // unless a symbol passes the gate; the summary below reports what happened.
+    const summary = await runScan({ chatId, telegram_user_id })
+    const skips = Object.entries(summary.skipped)
+      .map(([k, v]) => `${escapeHtml(k)} ${v}`)
+      .join(', ')
+    await sendMessage(
+      chatId,
+      `<b>Scan complete</b>\nscanned ${summary.scanned} · sent ${summary.sent}` +
+        (skips ? `\nskipped: ${skips}` : ''),
+      'HTML'
+    )
+  } catch (err) {
+    console.error('scan failed', err)
+    await sendMessage(chatId, '⚠️ Scan run failed')
   }
 }
 
