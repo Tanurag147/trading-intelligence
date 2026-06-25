@@ -14,7 +14,7 @@
 - Do not touch n8n WF00 and WF13–WF19 on ops.sillive.com.au — these are live, published production workflows (verified 2026-06-25). Never modify, disable, or delete them without my explicit go-ahead.
 
 ## 2. BUILD DISCIPLINE
-- `TRADING_OS_SPEC_v3.md` is canonical. It governs. If code and spec conflict, the spec wins unless I say otherwise. ⚠️ This file does NOT currently exist in the repo — see flag below.
+- `TRADING_OS_SPEC_v3.md` is canonical. It governs. If code and spec conflict, the spec wins unless I say otherwise. See the spec's STATUS HONESTY note and §7 SAFETY-CRITICAL gaps for the current built-vs-enforcing state — engines are coded but the risk gate is not yet enforcing against live state.
 - Build order: pure in-memory modules BEFORE any persistence (`lib/feed.ts`, `lib/proposal.ts`, `lib/risk-gate.ts`, `lib/exit-stepper.ts`, `lib/decide.ts`, `lib/build-proposal.ts` before DB). All six exist.
 - Vertical-slice, depth-first: a full working slice before breadth.
 - Migrations applied via Supabase MCP `apply_migration`, NEVER `supabase db push` or CLI auto-apply.
