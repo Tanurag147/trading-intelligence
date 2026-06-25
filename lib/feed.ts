@@ -29,7 +29,7 @@ export interface Quote {
 }
 
 /**
- * Every concrete feed (CoinGeckoFeed, PolygonFeed, FinnhubFeed, FixtureFeed)
+ * Every concrete feed (AlpacaFeed, FixtureFeed)
  * implements this. Methods are async and may throw — callers translate to
  * fail-closed "NO PROPOSAL", they never swallow silently.
  */

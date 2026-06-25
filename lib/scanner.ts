@@ -40,9 +40,9 @@ import { buildRealProposalInput } from './propose';
 import { AlpacaFeed } from './feeds/alpaca';
 import type { Quote } from './feed';
 
-/** The seven symbols the scanner watches (US equities + the two index ETFs). */
+/** The ten Phase 1 symbols the scanner watches (US equities + the two index ETFs). */
 export const WATCHLIST: readonly string[] = [
-  'AAPL', 'NVDA', 'AMD', 'MSFT', 'GOOGL', 'SPY', 'QQQ',
+  'AAPL', 'MSFT', 'NVDA', 'AMZN', 'META', 'GOOGL', 'TSLA', 'AMD', 'SPY', 'QQQ',
 ];
 
 /** Anti-spam configuration. */

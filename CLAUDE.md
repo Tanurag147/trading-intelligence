@@ -1,178 +1,30 @@
-# Trading Intelligence System
+# CLAUDE.md — Trading OS v3 (trading-intelligence)
 
-You are working inside a personal trading intelligence platform for discretionary swing trading.
-Read this file completely before taking any action in this project.
+> Global operating protocol is inherited from `~/.claude/CLAUDE.md` — not repeated here. This file holds only project-specific rules.
 
----
+## 1. HARD BOUNDARIES — NEVER CROSS
+- No autonomous execution. Founder interaction is Approve / Skip / Snooze on proposal cards via Telegram; nothing executes without my tap. Never write code that places orders or bypasses this decision interface.
+- Failed-gate proposal cards can NEVER be approved. A card that failed its risk gate is dead — no override path, no exception, no "just this once."
+- Filter-stability rules are absolute: system rules are not overridable by in-the-moment discretion. The behavior gap (rationalizing past a rule in the moment) is the core risk this system exists to prevent. Never build an escape hatch that lets a rule be relaxed at decision time.
+- The four Phase 1 engines — regime, correlation, cost, exit — are MANDATORY, not optional or deferrable. Cost modeling and exit discipline are mandatory Phase 1, never deferred — these are where automated trading systems fail; they are not "later."
+- Never write to any non-`trading_` table. This is a SHARED database (other systems live here); writes outside the `trading_` prefix cross a system boundary. v3 currently writes only `trading_decisions`, `trading_open_positions`, `trading_proposals`, `trading_regime`, `trading_scan_alerts`, `trading_shadow_results`.
+- Never expose the Supabase service-role client/key to the client side. Server-only. This is a shared DB containing other systems' data — a leaked service-role key is full-database compromise.
+- No Anthropic/LLM API calls embedded in this repo. AI analysis runs via Claude Code, not an embedded API. (Verified: no `anthropic`/`openai` dependency, no API usage in code — do not introduce one without my go-ahead.)
+- Cron endpoints must verify `CRON_SECRET` (`Authorization: Bearer <CRON_SECRET>`). Both `/api/cron/regime` and `/api/cron/scan` enforce this — never add a cron route without it.
+- ⚠️ n8n protection (carried from prior CLAUDE.md, NOT verifiable from this repo): do not touch n8n `WF00`, `WF13–WF19` on `ops.sillive.com.au`. Confirm this is still live, or tell me to drop it.
 
-## Identity
+## 2. BUILD DISCIPLINE
+- `TRADING_OS_SPEC_v3.md` is canonical. It governs. If code and spec conflict, the spec wins unless I say otherwise. ⚠️ This file does NOT currently exist in the repo — see flag below.
+- Build order: pure in-memory modules BEFORE any persistence (`lib/feed.ts`, `lib/proposal.ts`, `lib/risk-gate.ts`, `lib/exit-stepper.ts`, `lib/decide.ts`, `lib/build-proposal.ts` before DB). All six exist.
+- Vertical-slice, depth-first: a full working slice before breadth.
+- Migrations applied via Supabase MCP `apply_migration`, NEVER `supabase db push` or CLI auto-apply.
+- Migrations live in `supabase/migrations/`. Current state: 3 — `0001_trading_os_v3.sql`, `0002_callback_nonces.sql`, `0003_scanner_state.sql` (all present in the shared project's ledger).
 
-This system belongs to a solo founder and trader. It is not a SaaS product.
-There are no other users. All database writes are yours. All Telegram messages go to you.
-
----
-
-## Infrastructure
-
-| Component | Detail |
-|---|---|
-| Supabase | Project: `wjfsiyxqxyollbcuzjsv` (Gautam Command, ap-northeast-1) |
-| Vercel | This project — handles Telegram webhook + cron jobs |
-| Telegram bot | @tanurag_trading_bot (command surface) |
-| n8n | ops.sillive.com.au — **do not touch WF00, WF13–WF19** |
-| Exchange | Independent Reserve (BTC, ETH, SOL) |
-| Charting | TradingView (4H + Daily timeframes) |
-
----
-
-## Database — Supabase Tables
-
-All tables are prefixed `trading_` and are in the `public` schema.
-**Never write to `agent_tasks`, `tasks`, or any non-`trading_` table.**
-
-| Table | Purpose |
-|---|---|
-| `trading_positions` | Every trade — entry, exit, R-multiple, journal fields |
-| `trading_regime` | Daily ADX/EMA/ATR regime detection per asset |
-| `trading_setups` | Named setup types with accumulated win rate stats |
-| `trading_signals` | Every signal that fires, acted on or not |
-| `trading_journal` | One row per trading day |
-| `trading_portfolio_state` | Equity curve snapshots for drawdown tracking |
-
-Views available:
-- `trading_open_positions` — live positions
-- `trading_setup_performance` — win rate × expectancy by setup × regime
-- `trading_weekly_summary` — rolling 7-day R-multiple stats
-
----
-
-## Assets Being Traded
-
-- **BTC** — primary, highest conviction
-- **ETH** — secondary
-- **SOL** — tertiary
-- BTC, ETH, SOL are >0.85 correlated. Max one crypto long at a time unless combined risk ≤ 2%
-
----
-
-## The Four Rules (Non-Negotiable)
-
-Every trade must satisfy all four before entry:
-
-1. **Max 2% capital risk per trade** — position size calculated from stop distance
-2. **Written entry reason** — specific, must reference level/signal/pattern
-3. **Hard stop loss** — real platform order, not mental
-4. **Minimum 2:1 reward-to-risk** — |target−entry| / |entry−stop| ≥ 2.0
-
-A trade that fails any rule does not get entered. No exceptions.
-
----
-
-## Regime Logic
-
-Regime is calculated nightly (7AM ACST) from 90 days of 4H candles aggregated to daily.
-
-| Regime | Condition |
-|---|---|
-| `trending_up` | ADX(14) > 25 AND price > EMA(20) |
-| `trending_down` | ADX(14) > 25 AND price < EMA(20) |
-| `ranging` | ADX(14) ≤ 25 AND ATR ratio ≤ 1.5 |
-| `volatile` | ATR ratio > 1.5 (current ATR vs 30-day average) |
-
-**Regime gates all signals.** A signal valid in trending is not valid in ranging.
-
-Signal compatibility (general):
-- RSI bounce from support → valid in `ranging`, `trending_up`
-- EMA trend continuation → valid in `trending_up` only
-- VWAP reclaim → valid in `trending_up`, `trending_down`
-- Support breakout retest → valid in `trending_up` only
-- Volume expansion breakout → valid in `trending_up` only
-
----
-
-## Risk Management Rules
-
-| Threshold | Action |
-|---|---|
-| Single trade | Max 2% capital |
-| Total portfolio | Max 6% deployed risk (3 concurrent trades) |
-| Volatile regime | Halve all position sizes (1% per trade max) |
-| 5% drawdown from peak | Review all open trades, no new entries |
-| 10% drawdown | Halve position sizes for 2 weeks |
-| 15% drawdown | Stop trading, full system review |
-| 20% drawdown | System failure — start over from Phase 0 |
-
----
-
-## R-Multiple
-
-**All performance is measured in R-multiples, not % or AUD P&L.**
-
-- R = result expressed as multiples of initial risk
-- Win of $200 on a $100 risk = +2.0R
-- Loss of $100 on a $100 risk = −1.0R
-- Target for the system: positive expectancy (avg R across all trades > 0)
-
----
-
-## What Stays Manual Forever
-
-- Final entry decision (you, not the bot)
-- Stop loss placement (chart-based, not formula)
-- Early exit when thesis changes
-- Setup quality scoring (1–5) before entry
-- Weekly review reflection (written by you)
-
----
-
-## Telegram Commands (Bot Handles Automatically)
-
-| Command | Description |
-|---|---|
-| `trading:regime` | Today's regime for BTC/ETH/SOL |
-| `trading:size BTC 65000 63500` | Position sizing calculator |
-| `trading:positions` | Open trades |
-| `trading:brief` | Regime + open positions summary |
-| `trading:help` | Command list |
-
----
-
-## Claude Code Slash Commands (AI Analysis — Run in Terminal)
-
-| Command | Description |
-|---|---|
-| `/pre-trade` | Adversarial analysis before entering a trade |
-| `/weekly-review` | Sunday R-multiple performance report |
-| `/briefing` | Morning market brief with regime context |
-
----
-
-## Coding Standards
-
-- TypeScript strict mode
-- No `any` types
-- Server-only Supabase client (service role key — never expose to client)
-- No autonomous trade execution — never write code that places orders
-- No Anthropic API calls — AI runs via Claude Code (Max subscription), not embedded API
-- Vercel cron endpoints must verify `CRON_SECRET` header
-- All Telegram responses use Markdown parse mode
-
----
-
-## Environment Variables Required
-
-```
-SUPABASE_URL=https://wjfsiyxqxyollbcuzjsv.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=...
-TRADING_BOT_TOKEN=...
-TELEGRAM_TRADING_CHAT_ID=...
-CRON_SECRET=...
-```
-
----
-
-## Key Principle
-
-You are an intelligence layer, not an execution layer.
-Your job is to inform better decisions, enforce the four rules, and surface patterns.
-You never place trades. You never make autonomous decisions. You challenge entries, not confirm them.
+## 3. STACK FACTS
+- Framework: Next.js 16.2.6 / React 19 / TypeScript (strict) / Vercel / Supabase. Tests: Vitest. Supabase client is server-only (service-role key).
+- Supabase project ref: `wjfsiyxqxyollbcuzjsv`. ⚠️ SHARED project — the same DB as Gautam Command and other systems. The `trading_*` migrations sit in one ledger alongside `00xx` (Gautam Command), `pramaanx_*`, `director_os_*`, `travel_*`, etc. Never assume isolation; see the non-`trading_` write-ban above.
+- Data feed: Alpaca. `AlpacaFeed` (`lib/feeds/alpaca.ts`) implements the `MarketFeed` interface (`lib/feed.ts`) — over-fetches by date window then slices for bars; only `1d` timeframe supported; non-200 fails closed (401 auth / 403 tier called out distinctly). `FixtureFeed` is the test feed.
+- Finnhub rejected due to unreliable candle access (403 on /stock/candle); Alpaca is the feed.
+- Phase 1 universe (10 symbols): AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA, AMD, SPY, QQQ. Defined in both `app/api/telegram/route.ts` and the auto-scanner `WATCHLIST` (`lib/scanner.ts`) — kept in sync.
+- Telegram: webhook verifies the `x-telegram-bot-api-secret-token` header (`TELEGRAM_WEBHOOK_SECRET`); single-use per-action nonces (`lib/nonce.ts`); callback format `v3:<action>:<proposal_id>` with actions approve/skip/snooze (`lib/telegram.ts`).
+- Shadow Exit Tracker: `lib/shadow-tracker.ts` — phantom-trades shadow-routed (skipped/expired) proposals through the existing exit stepper, persists `would_have_*` verdicts to `trading_shadow_results`.
