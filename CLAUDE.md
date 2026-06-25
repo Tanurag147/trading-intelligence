@@ -11,7 +11,7 @@
 - Never expose the Supabase service-role client/key to the client side. Server-only. This is a shared DB containing other systems' data — a leaked service-role key is full-database compromise.
 - No Anthropic/LLM API calls embedded in this repo. AI analysis runs via Claude Code, not an embedded API. (Verified: no `anthropic`/`openai` dependency, no API usage in code — do not introduce one without my go-ahead.)
 - Cron endpoints must verify `CRON_SECRET` (`Authorization: Bearer <CRON_SECRET>`). Both `/api/cron/regime` and `/api/cron/scan` enforce this — never add a cron route without it.
-- ⚠️ n8n protection (carried from prior CLAUDE.md, NOT verifiable from this repo): do not touch n8n `WF00`, `WF13–WF19` on `ops.sillive.com.au`. Confirm this is still live, or tell me to drop it.
+- Do not touch n8n WF00 and WF13–WF19 on ops.sillive.com.au — these are live, published production workflows (verified 2026-06-25). Never modify, disable, or delete them without my explicit go-ahead.
 
 ## 2. BUILD DISCIPLINE
 - `TRADING_OS_SPEC_v3.md` is canonical. It governs. If code and spec conflict, the spec wins unless I say otherwise. ⚠️ This file does NOT currently exist in the repo — see flag below.
